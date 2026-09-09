@@ -606,3 +606,146 @@ references any path outside `mtgrn/` (checked by grep).
 ## Kaggle and report back AUPRC/AUROC, per their explicit instruction not
 ## to guess at this before the test is actually run.
 
+---
+
+## Phase 1 -- positive-control RESULT (Kaggle GPU, seed 0, --batch_size 8,
+## prior = TRRUST union RegNetwork union ground truth, G=769, 100% recall
+## ceiling by construction)
+
+**AUPRC=0.9699, AUROC=0.9986, F1=0.9801** (dataset's own chance baseline:
+AUPRC=0.0895, AUROC=0.5) -- **10.8x baseline AUPRC**, AUROC within 0.0014
+of perfect. Decisive pass, not a marginal one.
+
+## VERDICT: architecture confirmed sound. The chance-level TRRUST/
+## RegNetwork result (Phase 1's original FAIL) was ENTIRELY the diagnosed
+## recall-ceiling problem -- not a hidden bug. When every true edge is
+## actually reachable through the mask, MTGRN recovers structure almost
+## perfectly. This directly answers the question the positive control was
+## designed to settle (per the user's own framing: "we don't yet know if
+## chance-level results are a coverage problem or a code problem") --
+## it's a coverage problem, fully and cleanly.
+
+**This also answers the Phase 1 options question from before, without
+needing to guess**: options (a) RegNetwork-only (3.4% recall ceiling) and
+(b) tightening the ground truth (recall ceiling stayed in the same 2-4%
+band across every combination tried) were never going to get remotely
+close to this result -- the positive control's own recall ceiling is
+100% vs their ~2-4%, and AUPRC scales with how much of the true signal is
+even reachable, not with the architecture. Retrying (a) or (b) would
+almost certainly reproduce more near-chance results and burn more Kaggle
+time for a foregone conclusion. **Recommend option (c)**: treat Phase 1's
+mESC/TRRUST/RegNetwork validation as inconclusive due to a real-data
+resource mismatch (BEELINE's ground-truth reconstruction is unavoidably
+denser than curated TRRUST/RegNetwork priors can cover, see acquisition
+section above) -- NOT an architecture failure, now positively confirmed
+-- and proceed to Phase 2 (SERGIO density sweep), which uses a
+completely different, denser, purpose-built synthetic prior (not TRRUST/
+RegNetwork), so this specific real-data recall-ceiling problem doesn't
+carry over.
+
+## STATUS: PHASE 1 CLOSED (user-confirmed). Positive control passed
+## decisively: AUPRC=0.9699, AUROC=0.9986, F1=0.9801 (dataset baseline:
+## AUPRC=0.0895, AUROC=0.5) -- 10.8x baseline AUPRC, architecture
+## confirmed sound. Chance-level TRRUST/RegNetwork result stands as a
+## documented real-data coverage artifact (recall ceiling 1.9%/3.4%), not
+## an architecture failure. No further Phase 1 fix attempts (per option
+## (c)). Proceeding to Phase 2 as scoped.
+
+---
+
+## Phase 2 -- SERGIO density sweep. STARTED 2026-09-10.
+
+**Two additions to the original Phase 2 plan, per explicit user
+instruction:**
+1. All training happens on Kaggle, none locally -- same policy as every
+   other model. The three files below were written and syntax/dry-run
+   verified here, but NEVER executed against real data or trained in this
+   environment.
+2. Tier-3 feasibility checked BEFORE writing the full sweep (not assumed).
+
+### Tier-3 feasibility check (done, BEFORE writing run_density_experiment_mtgrn.py)
+
+Unlike RiTINI (hard architectural floor at n_timepoints=3 -- needs >=4
+DISCRETE kept-replicate timepoints for its Neural ODE), MTGRN treats every
+pooled CELL as its own timestep ("T is equal to C", Phase 0 spec) -- a
+fundamentally different feasibility question. Also unlike RiTINI/Marlene's
+per-bin treatment, mtgrn/PROGRESS.md's own Phase 0 notes said Phase 2
+reuses pseudogrn/'s exact pooling pattern: ALL 9 bins pooled together per
+(tier, seed), not one run per bin -- re-confirmed by re-reading
+pseudogrn/sergio_prepare_data.py and pseudogrn/run_density_experiment.py
+directly before writing anything, rather than assuming.
+
+Used a REAL, already-confirmed number (not guessed): ritini/data_ritini/
+tier*/prep_meta.json (from the real Kaggle SERGIO data the user already
+provided) shows `n_cells_in_bin_per_replicate: 300` for every bin/replicate.
+With 9 bins pooled per replicate: 2,700 cells/replicate.
+
+| tier | replicates kept | pooled cells (all 9 bins) | valid windows (W=10, M=5) |
+|------|------------------|------------------------------|------------------------------|
+| 1 | 15 | 40,500 | 40,486 |
+| 2 | 5  | 13,500 | 13,486 |
+| 3 | 3  | 8,100  | 8,086  |
+
+**Tier 3 is comfortably feasible** -- 8,086 windows is nowhere near a
+floor. The real design concern is the OPPOSITE of RiTINI's: Tier 1's
+~40,486 windows/epoch would be slow to train through, not too few to
+train at all. Addressed via a `--max_cells` cap (same mechanism as
+pseudogrn/'s own, applied AFTER pseudotime is computed over the full pool
+for manifold quality) -- default 1500, lower than pseudogrn's 3000 since
+MTGRN's per-window cost is a full transformer forward/backward pass, not
+pseudogrn's Mixed-KSG MI estimator. NOT independently timed on real
+SERGIO data (no real SERGIO dataset available in this local environment,
+same constraint noted throughout this project) -- flagged in both new
+scripts' docstrings as an estimate to verify on the first real Kaggle run,
+same discipline as pseudogrn's own --max_cells docstring.
+
+Memory (GPU/CPU) is NOT a concern for Phase 2 the way it was for Phase 1 --
+SERGIO's gene count (400, ~37 TFs) is far smaller than the mESC positive
+control's G=769, let alone the G=12,291 mistake that originally motivated
+the memory guard. The guard is still wired into train_sergio_mtgrn.py
+regardless, as cheap insurance -- costs nothing to check.
+
+### Files written (Kaggle-runnable, not executed here)
+
+1. **`sergio_prepare_data_mtgrn.py`** -- adapted from pseudogrn/'s pattern
+   (NOT ritini's/marlene's): same load_sergio_dataset, same tier-
+   subsampling RNG mechanism, same DPT pipeline (sc.pp.pca -> sc.pp.
+   neighbors -> sc.tl.diffmap -> sc.tl.dpt), same --max_cells cap
+   mechanism. Builds the dense TF-bipartite prior (Phase 0's judgment
+   call) and writes it as `prior_adjacency.npy` alongside `ExpressionData.
+   csv`/`PseudoTime.csv`/`gt_edges.csv`/`prep_meta.json`. Includes a
+   defensive feasibility check written to prep_meta.json (n_windows_
+   estimate, feasible flag) even though Tier 3 is expected to pass it --
+   same safety-net convention as every other model.
+2. **`train_sergio_mtgrn.py`** -- Phase 2 training script, one (tier,
+   seed) combo per invocation. Reuses make_windows/chronological_split/
+   warmup_cosine_lr/compute_continuous_auprc_auroc/
+   compute_degree_weighted_topk_f1/evaluate_in_batches directly from
+   train_mesc_validation.py (same folder, no side effects on import, no
+   need to duplicate). Wires in the memory guard (checks GPU VRAM if
+   --device cuda, else system RAM). metrics.json schema matches
+   pseudogrn/train_sergio.py's "Group B" convention (auprc_per_t/
+   auroc_per_t as single-element lists -- one pooled prediction, not
+   per-discrete-timepoint). **`--results_root` is a real, forwarded value
+   that determines the actual output path** -- deliberately NOT
+   reproducing ritini/run_density_experiment_ritini.py's dead-flag bug
+   (there, --results_root was accepted but never passed to the training
+   subprocess, which silently wrote to a different hardcoded path).
+3. **`run_density_experiment_mtgrn.py`** -- orchestrator, adapted from
+   pseudogrn/run_density_experiment.py's structure (TIERS={1:15,2:5,3:3},
+   N_SEEDS=3, same resumability/--dry_run/logging conventions). Sweep is
+   3 tiers x 3 seeds = **9 runs total, no bin dimension** (see above for
+   why this differs from ritini's 81-run 9-bin x 3-tier x 3-seed sweep).
+
+**Verified (not just written)**: all three files py_compile cleanly;
+`run_density_experiment_mtgrn.py --dry_run` prints the correct 9-command
+sweep plan (3 tiers x 3 seeds, correct flags forwarded to both
+sub-scripts) without touching the filesystem or any real data -- the only
+local execution performed for Phase 2.
+
+## STATUS: Phase 2 harness written and dry-run-verified. NOT yet run on
+## Kaggle (per user instruction, all training happens there). Next step:
+## user runs `python run_density_experiment_mtgrn.py` (or the granular
+## per-combo commands) on Kaggle and reports back metrics.json results,
+## same workflow as Phase 1's positive control.
+

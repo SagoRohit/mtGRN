@@ -1,0 +1,19 @@
+{
+  "auprc": 0.9698723958899311,
+  "auroc": 0.9986091292389309,
+  "f1": 0.9801414683965655,
+  "precision": 0.9801414683965655,
+  "recall": 0.9801414683965655,
+  "n_genes": 769,
+  "n_gt_edges": 52874,
+  "this_dataset_baseline_auprc": 0.08952711855223233,
+  "this_dataset_baseline_auroc": 0.5,
+  "n_train_windows": 325,
+  "n_test_windows": 82,
+  "paper_auroc_reference_only": 0.713,
+  "paper_auprc_reference_only": 0.748,
+  "paper_f1_reference_only": 0.694,
+  "genie3_baseline_auroc_reference_only": 0.531,
+  "genie3_baseline_auprc_reference_only": 0.168,
+  "seed": 0
+}
