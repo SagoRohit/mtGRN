@@ -1,0 +1,16 @@
+# Isolated environment for mtgrn/ (proposal Section 5.6: each model runs
+# in its own containerized/virtual environment). Versions pinned to what
+# this harness was built and unit-tested against (CPU torch -- MTGRN is a
+# from-scratch nn.Module implementation, no GNN library dependency like
+# ritini's torch-geometric).
+torch==2.14.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.5.3
+pandas==3.0.5
+scipy==1.18.1
+scikit-learn==1.9.0
+matplotlib==3.11.1
+# needed for Phase 2's sergio_prepare_data_mtgrn.py (pseudotime via DPT,
+# same pattern reused from pseudogrn/) and Phase 1's data_mesc.py.
+scanpy==1.12.4
+anndata==0.13.3.post0

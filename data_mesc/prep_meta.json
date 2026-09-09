@@ -1,0 +1,12 @@
+{
+  "n_genes": 769,
+  "n_gt_edges": 52874,
+  "n_cells": 421,
+  "proportion": 0.08952711855223233,
+  "top_n_variable": 580,
+  "source_expr": "data_raw/extracted/BEELINE-data/inputs/scRNA-Seq/mESC/ExpressionData.csv",
+  "source_ground_truth_network": "data_raw/extracted/Networks/mouse/mESC-ChIP-seq-network.csv",
+  "paper_table2_n_genes": 774,
+  "paper_table2_n_positive_edges": 8085,
+  "paper_table2_proportion": 0.014
+}
