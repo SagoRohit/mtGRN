@@ -1,10 +1,20 @@
 # Isolated environment for mtgrn/ (proposal Section 5.6: each model runs
 # in its own containerized/virtual environment). Versions pinned to what
-# this harness was built and unit-tested against (CPU torch -- MTGRN is a
-# from-scratch nn.Module implementation, no GNN library dependency like
-# ritini's torch-geometric).
-torch==2.14.0+cpu
---extra-index-url https://download.pytorch.org/whl/cpu
+# this harness was built and unit-tested against. MTGRN is a from-scratch
+# nn.Module implementation, no GNN library dependency like ritini's
+# torch-geometric.
+#
+# TORCH IS DELIBERATELY NOT LISTED HERE -- install it separately, matched
+# to where you're running:
+#   - Local/CPU-only dev machine: pip install torch==2.14.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+#   - Kaggle (or any GPU host): DO NOT pip-install torch from this file --
+#     install everything below with `pip install -r requirements.txt`,
+#     and use the CUDA-enabled torch the environment already provides.
+#     Installing the CPU-only pin above on a GPU host silently overwrites
+#     the working CUDA build with a CPU-only one -- `torch.cuda.is_available()`
+#     then returns False even with a GPU attached and selected. Confirmed
+#     hit during Phase 1 Kaggle setup; fix was to restart the session
+#     (restores the host's own torch) and install only the packages below.
 numpy==2.5.3
 pandas==3.0.5
 scipy==1.18.1
