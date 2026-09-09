@@ -313,11 +313,15 @@ def main():
 
     # Memory guard (cheap insurance, see model.py's docstring): this is
     # exactly the failure mode that OOM-killed this project's dev machine
-    # before (G=769 unbatched eval, and an earlier G=12,291 exploration --
-    # see PROGRESS.md). Checks the ACTUAL batch_size/W/G about to be used,
-    # against currently available memory, before any tensor is allocated.
+    # before (G=769 unbatched eval, an earlier G=12,291 exploration, and a
+    # CUDA OOM on a Kaggle T4 -- see PROGRESS.md). Checks the ACTUAL
+    # batch_size/W/G/n_spatial_blocks about to be used, against currently
+    # available memory ON THE ACTUAL DEVICE (GPU VRAM if --device cuda,
+    # else system RAM), before any tensor is allocated.
     assert_spatial_attention_memory_safe(n_genes=G, n_heads=args.n_heads,
-                                          batch_size=args.batch_size, W=args.W)
+                                          batch_size=args.batch_size, W=args.W,
+                                          n_spatial_blocks=args.n_spatial_blocks,
+                                          device=device)
 
     X, Y = make_windows(E_t_norm, args.W, args.M)
     train_idx, test_idx = chronological_split(len(X), args.train_frac)

@@ -153,71 +153,110 @@ def _read_available_memory_bytes() -> int | None:
     return None
 
 
+def _read_available_gpu_memory_bytes(device) -> int | None:
+    """Live free-VRAM read via torch.cuda.mem_get_info() for the given
+    device. Returns None if CUDA isn't actually available/selected, so
+    the caller falls back to the system-RAM check."""
+    if not (torch.cuda.is_available() and str(device).startswith("cuda")):
+        return None
+    free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+    return free_bytes
+
+
 def estimate_spatial_attention_bytes(n_genes: int, n_heads: int, batch_size: int, W: int,
-                                      dtype_bytes: int = 4, n_live_tensors: int = 3) -> int:
+                                      n_spatial_blocks: int = 1, dtype_bytes: int = 4,
+                                      n_live_tensors_per_block: int = 3) -> int:
     """Worst-case memory estimate for the spatial attention module's
-    largest intermediate tensor, shape (batch_size * W, n_heads, n_genes,
+    largest intermediate tensors, shape (batch_size * W, n_heads, n_genes,
     n_genes) -- see MTGRN.forward's spatial-block reshape, where W (the
     history window) becomes the attention "batch" dimension. This is what
     actually crashed the dev machine before (mtgrn/PROGRESS.md's
-    acquisition section documents an early G=12,291 attempt, and
-    train_mesc_validation.py's evaluate_in_batches docstring documents an
-    exit-137 OOM kill at G=769 with an unbatched eval forward). Scales as
-    O(batch_size * W * n_heads * n_genes^2) -- quadratic in gene count is
-    the dominant risk, not batch size or W.
+    acquisition section documents an early G=12,291 attempt, an exit-137
+    OOM kill at G=769 with an unbatched eval forward, and a CUDA OOM at
+    G=769/batch_size=32 on a 14.56GB T4 during Kaggle Phase 1 -- see
+    below). Scales as O(batch_size * W * n_heads * n_genes^2) -- quadratic
+    in gene count is the dominant risk, not batch size or W.
 
-    n_live_tensors=3 is a deliberately rough (not precisely profiled)
-    multiplier for how many tensors of this shape are realistically alive
-    at once during a training step (raw scores, softmax output, and
-    autograd's saved-for-backward copy) -- intentionally conservative
-    without being wildly so; this is a cheap early-warning guard, not a
-    memory profiler.
+    n_live_tensors_per_block=3 is a deliberately rough (not precisely
+    profiled) multiplier for how many tensors of this shape are
+    realistically alive at once PER BLOCK during a training step (raw
+    scores, softmax output, and autograd's saved-for-backward copy).
+    n_spatial_blocks multiplies this again -- EACH stacked spatial block
+    (BlockStack's n_blocks, MTGRN's own n_spatial_blocks) runs its own
+    full G x G attention and needs its own saved activations for
+    backprop through the whole stack, not just the last block's (the one
+    actually returned). This factor was MISSING from the first version of
+    this guard and is why it under-estimated a real GPU OOM: at G=769,
+    batch_size=32, n_spatial_blocks=2 (this harness's default), the
+    single-block estimate was ~8.46GB, but the actual CUDA OOM traceback
+    showed ~13.9GB already in use before failing to allocate one more
+    2.82GB tensor (~16.7GB actual peak) -- almost exactly the 2x a
+    2-block multiplier predicts (~16.9GB). Always pass the SAME
+    n_spatial_blocks the model is actually constructed with.
     """
-    return batch_size * W * n_heads * n_genes * n_genes * dtype_bytes * n_live_tensors
+    return (batch_size * W * n_heads * n_genes * n_genes * dtype_bytes
+            * n_live_tensors_per_block * n_spatial_blocks)
 
 
 def assert_spatial_attention_memory_safe(n_genes: int, n_heads: int, batch_size: int, W: int,
+                                          n_spatial_blocks: int = 1, device="cpu",
                                           safety_fraction: float = 0.5) -> None:
     """Hard guard: estimate the spatial attention module's peak memory
     footprint BEFORE any tensor is allocated, and raise a clear
     MemoryError with an actionable suggestion instead of letting the OS
-    OOM-kill the process (the failure mode that crashed this project's
-    dev machine before -- see estimate_spatial_attention_bytes's
-    docstring). Same spirit/cheap-insurance intent as
-    sergio_prepare_data.py's <30-TF warning, but a hard stop rather than a
-    soft print, since an OOM kill is destructive (can take down the whole
-    Claude Code session) where a bad TF count merely gives a weak result.
+    or CUDA driver OOM-kill the process (the failure modes that crashed
+    this project's dev machine, and separately OOM'd on a Kaggle GPU --
+    see estimate_spatial_attention_bytes's docstring). Same spirit/cheap-
+    insurance intent as sergio_prepare_data.py's <30-TF warning, but a
+    hard stop rather than a soft print, since an OOM kill/crash is
+    destructive where a bad TF count merely gives a weak result.
+
+    IMPORTANT: pass the actual `device` the model will run on. GPU VRAM
+    (checked via torch.cuda.mem_get_info when device is "cuda*") is
+    typically far SMALLER than system RAM (checked via /proc/meminfo
+    otherwise) -- a config that easily passes the system-RAM check can
+    still CUDA-OOM on the actual GPU (confirmed: 9.08GB estimated vs
+    31.61GB system RAM available passed cleanly on a Kaggle GPU
+    instance, then CUDA OOM'd against the T4's real 14.56GB VRAM, because
+    the original version of this guard never checked GPU memory at all
+    when a GPU was requested).
 
     Compares against `safety_fraction` (default 50%) of CURRENTLY
-    AVAILABLE system memory, read live from /proc/meminfo -- so the exact
-    same n_genes/batch_size/W choice can correctly pass on a 16GB Kaggle
-    instance and correctly fail on a 7GB dev machine without needing
-    separate hardcoded thresholds per environment. If /proc/meminfo isn't
-    readable (non-Linux), prints a warning and skips the check rather than
-    blocking the run.
+    AVAILABLE memory on whichever device applies -- so the exact same
+    n_genes/batch_size/W/n_spatial_blocks choice is checked against
+    whatever's actually going to hold the tensors, not a hardcoded
+    threshold. If neither /proc/meminfo nor CUDA's memory API is
+    readable, prints a warning and skips the check rather than blocking
+    the run.
     """
-    needed = estimate_spatial_attention_bytes(n_genes, n_heads, batch_size, W)
-    available = _read_available_memory_bytes()
+    needed = estimate_spatial_attention_bytes(n_genes, n_heads, batch_size, W,
+                                               n_spatial_blocks=n_spatial_blocks)
+    available = _read_available_gpu_memory_bytes(device)
+    source = "GPU VRAM (torch.cuda.mem_get_info)"
     if available is None:
-        print("WARNING: could not read /proc/meminfo -- skipping spatial-attention "
+        available = _read_available_memory_bytes()
+        source = "system RAM (/proc/meminfo)"
+    if available is None:
+        print("WARNING: could not read GPU or system memory -- skipping spatial-attention "
               "memory safety check. Proceed with caution on large gene counts.")
         return
     budget = available * safety_fraction
     if needed > budget:
-        max_safe_batch = max(1, int(budget // (W * n_heads * n_genes * n_genes * 4 * 3)))
+        per_batch_unit = W * n_heads * n_genes * n_genes * 4 * 3 * n_spatial_blocks
+        max_safe_batch = max(1, int(budget // per_batch_unit))
         raise MemoryError(
             f"Spatial attention memory guard: estimated peak footprint "
             f"{needed / 1e9:.2f}GB (n_genes={n_genes}, n_heads={n_heads}, "
-            f"batch_size={batch_size}, W={W}) exceeds {safety_fraction:.0%} of "
-            f"currently available system memory ({available / 1e9:.2f}GB available, "
-            f"{budget / 1e9:.2f}GB budget). This is the failure mode that crashed "
-            f"this project's dev machine before (see mtgrn/PROGRESS.md) -- reduce "
-            f"n_genes, batch_size, or W (e.g. try --batch_size {max_safe_batch}), or "
-            f"run on a machine/instance with more RAM, rather than proceeding and "
-            f"risking an OOM kill."
+            f"batch_size={batch_size}, W={W}, n_spatial_blocks={n_spatial_blocks}) "
+            f"exceeds {safety_fraction:.0%} of currently available {source} "
+            f"({available / 1e9:.2f}GB available, {budget / 1e9:.2f}GB budget). "
+            f"This is the failure mode that crashed this project before (see "
+            f"mtgrn/PROGRESS.md) -- reduce n_genes, batch_size, or W (e.g. try "
+            f"--batch_size {max_safe_batch}), or run on a device with more memory, "
+            f"rather than proceeding and risking an OOM kill/crash."
         )
     print(f"Spatial attention memory guard: estimated peak footprint {needed / 1e9:.2f}GB, "
-          f"within {safety_fraction:.0%} of {available / 1e9:.2f}GB available -- OK.")
+          f"within {safety_fraction:.0%} of {available / 1e9:.2f}GB available {source} -- OK.")
 
 
 def build_temporal_causal_mask(W: int, device=None) -> torch.Tensor:
