@@ -749,3 +749,213 @@ local execution performed for Phase 2.
 ## per-combo commands) on Kaggle and reports back metrics.json results,
 ## same workflow as Phase 1's positive control.
 
+---
+
+## Phase 2 -- FIRST SWEEP RESULT (--max_cells 1500 default): real signal,
+## but the density comparison itself is CONFOUNDED
+
+9-run sweep completed on Kaggle GPU (49.7 min total). Results downloaded
+and verified complete (all 9 metrics.json/best_model.ckpt pairs present,
+no corruption).
+
+| tier | AUPRC mean+/-std | AUROC mean+/-std | baseline AUPRC | ratio |
+|------|-------------------|--------------------|------------------|-------|
+| 1 (15 reps) | 0.0846+/-0.0123 | 0.9560+/-0.0021 | 0.0072 | 11.7x |
+| 2 (5 reps)  | 0.0831+/-0.0131 | 0.9562+/-0.0026 | 0.0072 | 11.5x |
+| 3 (3 reps)  | 0.0828+/-0.0057 | 0.9579+/-0.0013 | 0.0072 | 11.4x |
+
+**BUG (mine): all three tiers trained on identical data.** `prep_meta.json`
+confirms `n_cells_pooled_full` correctly differs per tier (40500/13500/8100),
+but `n_cells_written` is 1500 for ALL nine runs -- the `--max_cells 1500`
+default I chose is smaller than even Tier 3's full pool (8100), so every
+tier gets capped down to the SAME 1500 cells before training. The
+near-identical AUPRC/AUROC across tiers (11.4x-11.7x, well within noise)
+isn't evidence MTGRN is density-robust -- it's an artifact of the density
+variable never actually varying after the cap. **Valid finding from this
+run**: MTGRN learns real structure from real SERGIO data (~11-12x
+baseline, AUROC~0.96, consistent across 9 seeds). **Not answerable from
+this run**: the actual density-degradation question (proposal Section
+5.5 RQ2), which is what this sweep exists to test.
+
+## Timing extrapolation (requested before deciding a re-run), from the
+## EXISTING capped-run log (density_experiment_log.txt) -- NOT a
+## re-run, no new Kaggle time spent to produce this
+
+Log only has combo-level (prepare-done / train-done) timestamps, not
+per-epoch -- true per-epoch cost isn't directly observable, so this is an
+estimate with a stated uncertainty range, not a measured number.
+
+**Per-run breakdown from the log** (prep = sergio_prepare_data_mtgrn.py
+duration, train = train_sergio_mtgrn.py duration):
+
+| runid | prep (s) | train (s) |
+|---|---|---|
+| tier1_seed0/1/2 | 96 / 72 / 71 | 230 / 319 / 382 |
+| tier2_seed0/1/2 | 71 / 68 / 69 | 402 / 174 / 194 |
+| tier3_seed0/1/2 | 35 / 34 / 35 | 216 / 361 / 154 |
+
+**Train-time variance (154s-402s across runs that all trained on the
+IDENTICAL 1188 train windows/batch_size=32) is NOT tier-dependent** --
+it reflects `patience=3` early stopping triggering at different epoch
+counts per seed, not real per-tier cost differences (there can't be any:
+all 9 runs processed the same-sized capped data). This means I only have
+ONE dataset size's throughput to extrapolate from, with genuine
+uncertainty about how many of the up-to-20 epochs the longest observed
+run (402s, tier2_seed0) actually completed before stopping. Bounded two
+ways:
+  - **Optimistic**: 402s = a full 20 epochs -> 0.529s/batch.
+  - **Conservative**: 402s = only ~10 epochs (plausible under patience=3
+    if val_loss plateaus early at this tiny data scale) -> 1.058s/batch
+    (2x worse).
+
+**Scaling character (the actual question asked): batch cost does NOT
+scale with total cell/window count** -- GPU memory and per-batch compute
+depend only on batch_size/n_genes/W/M/d_model/n_heads/n_blocks, all FIXED
+regardless of how many cells are pooled. Raising --max_cells only changes
+how many BATCHES exist per epoch, which is an exactly LINEAR relationship
+(windows ~= cells; batches = train_windows / batch_size). No memory-
+pressure risk from raising the cap (unlike raising n_genes or batch_size,
+which the model.py memory guard already covers). The empirical prep-time
+data (DPT: PCA+neighbors+diffmap+dpt, the one part of the pipeline that
+COULD plausibly be worse than linear) shows the OPPOSITE -- prep_time/cell
+is 1.97ms at 40,500 cells (Tier 1) vs 5.14ms/4.28ms at 13,500/8,100 cells
+(Tiers 2/3) -- SUB-linear, fixed overhead amortizing at larger pool sizes,
+no evidence of quadratic blowup at 40,500 cells.
+
+**Extrapolated sweep totals (9 runs, up-to-20-epochs ceiling per run --
+real times will likely be LOWER if early stopping triggers sooner, which
+is plausible with far more gradient updates/epoch at larger cell counts):**
+
+| scenario | Tier 1 (per-run) | Tier 2 (per-run, unchanged) | Tier 3 (per-run, unchanged) | full 9-run sweep total |
+|---|---|---|---|---|
+| (a) fully uncapped: 40500/13500/8100 | 3.0h-6.0h (optimistic-conservative) | 1.0h-2.0h | 0.6h-1.2h | **~13.9h - ~27.5h** |
+| (b) partial cap 22500 (tier2/3 unchanged, already below cap) | 1.65h-3.3h | 1.0h-2.0h | 0.6h-1.2h | **~9.9h - ~19.6h** |
+
+## STATUS UPDATE: smoke test run on Kaggle (2 epochs, Tier 1 fully
+## uncapped, --max_cells 0). REAL number replaces the estimate below.
+
+**Measured**: `data_smoketest_tier1_uncapped` (40,500 cells, 40,486
+windows, 32,388 train / 8,098 test) -- 2 epochs, `real 24m33.816s` wall
+clock (`time` command). AUPRC=0.0889/AUROC=0.9592 after just 2 epochs
+(already ~12x baseline -- consistent with the capped sweep's numbers,
+reassuring that removing the cap doesn't break anything).
+
+**Calibrated per-batch rate: 736.9s/epoch / 1013 batches/epoch =
+0.7275s/batch** (batches/epoch matches the earlier estimate's arithmetic
+exactly -- 32,388 train windows / batch_size 32, ceil = 1013). This real
+number falls between the earlier optimistic (0.529s/batch) and
+conservative (1.058s/batch) bounds, closer to the middle -- confirms the
+2x bracketing was reasonably calibrated, but this is now a MEASURED
+anchor, not a guess. (One-time setup cost -- CSV load, window
+construction, memory guard -- is on the order of seconds to a few tens of
+seconds against a 1474s total, so its amortization effect on a 20-epoch
+estimate is negligible; not separately corrected for.)
+
+**Recalculated 20-epoch-ceiling projections (real rate, still assumes NO
+early stopping -- patience=3 may well trigger sooner, making these
+upper bounds, not expected values):**
+
+| | batches/epoch | s/epoch | per-run (20 ep) | x3 seeds |
+|---|---|---|---|---|
+| Tier 1 uncapped (40,500 cells) | 1013 | 736.9s | 4.09h | 12.28h |
+| Tier 1 @ 22,500 cap | 563 | 409.6s | 2.28h | 6.83h |
+| Tier 2 (13,500, unaffected either way) | 338 | 245.9s | 1.37h | 4.10h |
+| Tier 3 (8,100, unaffected either way) | 203 | 147.7s | 0.82h | 2.46h |
+
+**Full 9-run sweep totals (worst case, no early stopping):**
+- **(a) fully uncapped**: 12.28 + 4.10 + 2.46 = **~18.8 hours**
+- **(b) partial cap 22,500**: 6.83 + 4.10 + 2.46 = **~13.4 hours**
+
+Both narrower and more trustworthy than the earlier 2x-bracketed
+estimate (13.9-27.5h / 9.9-19.6h) now that (a) is anchored to a real
+measurement instead of two guessed bounds.
+
+## STATUS: real numbers in. User chose (b) partial cap 22,500. FINAL
+## CONFIG APPLIED, launching today -- see below.
+
+---
+
+## Phase 2 -- CORRECTED SWEEP: final config, verified before launch
+
+**1. --max_cells default changed 1500 -> 22500** in both
+`sergio_prepare_data_mtgrn.py` and `run_density_experiment_mtgrn.py`
+(docstrings updated in place to explain the correction, not just the
+value). NOT re-run here -- syntax-checked (`py_compile`) only, per user
+instruction ("don't run anything, I'll run it on Kaggle").
+
+**2. Capping logic verified as min(natural, cap), not force-set** -- the
+existing conditional (`if args.max_cells and adata.n_obs > args.max_cells:
+subsample to max_cells`) was ALREADY correct; the original bug was purely
+the default VALUE (1500 < every tier's natural pool), never the logic
+itself. Confirmed numerically (pure arithmetic, same conditional, no data
+needed) with cap=22500:
+
+| tier | natural pool | n_cells_written |
+|------|---------------|-------------------|
+| 1 | 40,500 | **22,500** (subsampled) |
+| 2 | 13,500 | **13,500** (untouched, already below cap) |
+| 3 | 8,100  | **8,100** (untouched, already below cap) |
+
+Three DISTINCT numbers, preserving tier ordering -- not three equal
+numbers like the first sweep.
+
+**3. Resumability level confirmed: COMBO-LEVEL ONLY, no mid-training
+checkpointing.** Checked both files directly:
+- `run_density_experiment_mtgrn.py` skips a (tier, seed) combo only if
+  its FINAL `metrics.json` already exists (line ~216).
+- `train_sergio_mtgrn.py` calls `torch.save(best_state, ...)` exactly
+  ONCE, after the training loop fully completes or early-stops (line
+  228) -- there is no per-epoch checkpoint inside the loop. A session
+  dying mid-training loses that combo's progress entirely; the next
+  launch restarts it from epoch 0 (the orchestrator only sees a missing
+  metrics.json and re-runs the whole combo). Not building mid-training
+  checkpointing given today's deadline, per user instruction to accept
+  combo-level-only if that's what exists.
+
+**4. Early stopping (patience=3) confirmed IMPLEMENTED (real code, not
+just spec)** -- `train_sergio_mtgrn.py` lines 183-187:
+```python
+else:
+    epochs_no_improve += 1
+    if epochs_no_improve >= args.patience:
+        print(f"Early stopping at epoch {epoch + 1} (patience={args.patience})")
+        break
+```
+**Confirmed FIRING, indirectly** -- no literal "Early stopping at epoch
+X" line was captured (density_experiment_log.txt only logged combo-level
+timestamps, not the training script's per-epoch stdout), so this is
+inferred from timing, not a captured log line. Using the smoke test's
+calibrated rate (27.6s/epoch at this sweep's 38 batches/epoch, 1188 train
+windows/batch_size=32), EVERY one of the 9 completed runs' train duration
+implies well under the 20-epoch budget:
+
+| runid | train (s) | implied epochs |
+|---|---|---|
+| tier1_seed0/1/2 | 230/319/382 | 8.3/11.5/13.8 |
+| tier2_seed0/1/2 | 402/174/194 | 14.5/6.3/7.0 |
+| tier3_seed0/1/2 | 216/361/154 | 7.8/13.1/5.6 |
+
+All 9 implied counts are below 20 -- consistent with early stopping
+firing in every completed run, not just some. If a literal confirmed
+line is wanted, the original Kaggle notebook's own cell output (if not
+cleared) would still have it.
+
+## LAUNCH COMMAND (Kaggle, corrected config, --max_cells now defaults to
+## 22500 so it doesn't need to be passed explicitly -- shown anyway for
+## clarity):
+
+```
+!python3 run_density_experiment_mtgrn.py --device cuda --max_cells 22500
+```
+
+Expected: ~13.4h worst-case (9 runs, up-to-20-epochs ceiling, likely less
+given early stopping's demonstrated behavior above) -- probably spans
+multiple Kaggle sessions; re-running the same command after a timeout
+resumes via the confirmed combo-level skip logic (item 3 above), just
+re-doing whichever combo was mid-training when the session died.
+
+## STATUS: Phase 2 corrected sweep ready to launch. All four
+## verifications (capping logic, resumability level, early-stopping
+## implementation + firing evidence) done and documented above. Waiting
+## on the user's Kaggle run.
+

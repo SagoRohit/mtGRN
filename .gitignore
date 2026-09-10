@@ -4,3 +4,5 @@ __pycache__/
 data_raw/
 mesc_validation_results/
 EOF
+*.zip
+mtgrn_results/

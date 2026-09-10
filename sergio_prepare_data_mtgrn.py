@@ -182,19 +182,29 @@ def main():
                           "-- MTGRN never sees it. Arbitrary but "
                           "deterministic, same convention as pseudogrn/.")
     ap.add_argument(
-        "--max_cells", type=int, default=1500,
+        "--max_cells", type=int, default=22500,
         help="Cap on pooled cells actually WRITTEN (DPT is still computed "
-             "over the full pool first, for manifold quality). Lower than "
-             "pseudogrn's 3000 default -- MTGRN's per-window cost is a full "
-             "temporal+spatial transformer forward/backward pass (not "
-             "pseudogrn's Mixed-KSG MI estimator), and Tier 1 pools ~40,500 "
-             "cells (~40,486 windows) uncapped, which would make even a few "
-             "epochs slow. NOT independently timed on real SERGIO data in "
-             "this environment (no real SERGIO dataset available locally, "
-             "same constraint noted throughout this project) -- treat 1500 "
-             "as a starting estimate to verify on the first real Kaggle "
-             "run's wall-clock time, same spirit as pseudogrn's own "
-             "--max_cells docstring. Set to 0 to disable capping.",
+             "over the full pool first, for manifold quality) -- only "
+             "applied via min(natural_pool_size, max_cells): a tier whose "
+             "natural pool is already below the cap is left untouched, "
+             "NOT force-set to the cap value. CORRECTED DEFAULT (was 1500 "
+             "-- see mtgrn/PROGRESS.md's Phase 2 first-sweep postmortem): "
+             "1500 is smaller than even Tier 3's full 8,100-cell pool, so "
+             "EVERY tier got capped down to the identical 1500 cells, "
+             "silently destroying the density-tier comparison this sweep "
+             "exists to measure (all three tiers trained on the same-sized "
+             "data). 22500 sits strictly ABOVE Tier 1's compressed target "
+             "and Tier 2/3's full natural pools (13,500/8,100) -- so with "
+             "this default, Tier 1 (40,500 natural) is the ONLY tier "
+             "actually subsampled, down to 22,500; Tier 2 and Tier 3 are "
+             "left at their full natural sizes, preserving the tier "
+             "ordering (22500 > 13500 > 8100) the experiment needs. Timing "
+             "calibrated from a real 2-epoch Kaggle GPU smoke test on "
+             "uncapped Tier 1 (40,500 cells, 24m34s/2 epochs) -- see "
+             "PROGRESS.md for the full 9-run sweep projection this default "
+             "is based on (~13.4h worst-case, no early stopping). Set to 0 "
+             "to disable capping entirely (fully-uncapped scenario, "
+             "~18.8h worst-case per PROGRESS.md).",
     )
     ap.add_argument("--W", type=int, default=10,
                      help="History window length, forwarded to "
