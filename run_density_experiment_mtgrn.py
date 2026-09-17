@@ -170,6 +170,22 @@ def main():
                           "pin torch, to avoid overwriting Kaggle's own "
                           "CUDA build).")
     ap.add_argument("--n_seeds", type=int, default=N_SEEDS)
+    ap.add_argument(
+        "--tiers", type=str, default=None,
+        help="Comma-separated subset of tier numbers to run, e.g. '3'. "
+             "Default: all tiers in TIERS (1,2,3). Use this to resume a "
+             "sweep on a fresh Kaggle session that only needs specific "
+             "tiers re-run (no metrics.json present to trigger the normal "
+             "skip-if-exists resumability, since a reset session has no "
+             "prior outputs on disk).",
+    )
+    ap.add_argument(
+        "--seeds", type=str, default=None,
+        help="Comma-separated subset of seed indices to run, e.g. '1,2'. "
+             "Default: range(--n_seeds), i.e. 0..n_seeds-1. Combine with "
+             "--tiers to target exactly the missing (tier, seed) combos "
+             "on a fresh session, e.g. --tiers 3 --seeds 1,2.",
+    )
     ap.add_argument("--data_root", type=str, default=".",
                      help="Where per-(tier,seed) data_tier<N>_seed<S>/ dirs "
                           "are created.")
@@ -191,16 +207,30 @@ def main():
     results_root = Path(args.results_root)
     log_file = Path(args.log_file)
 
+    if args.tiers is None:
+        tiers_to_run = TIERS
+    else:
+        requested = [int(t) for t in args.tiers.split(",")]
+        unknown = [t for t in requested if t not in TIERS]
+        if unknown:
+            raise ValueError(f"--tiers requested unknown tier(s) {unknown}; "
+                              f"valid tiers are {sorted(TIERS)}")
+        tiers_to_run = {t: TIERS[t] for t in requested}
+
+    seeds_to_run = (range(args.n_seeds) if args.seeds is None
+                    else [int(s) for s in args.seeds.split(",")])
+
     combos = [
         (tier, n_tp, seed)
-        for tier, n_tp in TIERS.items()
-        for seed in range(args.n_seeds)
+        for tier, n_tp in tiers_to_run.items()
+        for seed in seeds_to_run
     ]
 
-    log(f"Starting MTGRN density sweep: {len(TIERS)} tiers x "
-        f"{args.n_seeds} seeds = {len(combos)} runs (no bin dimension -- "
-        f"MTGRN pools all bins per (tier, seed), see module docstring). "
-        f"dry_run={args.dry_run}", log_file)
+    log(f"Starting MTGRN density sweep: {len(tiers_to_run)} tiers "
+        f"({sorted(tiers_to_run)}) x seeds {list(seeds_to_run)} = "
+        f"{len(combos)} runs (no bin dimension -- MTGRN pools all bins "
+        f"per (tier, seed), see module docstring). dry_run={args.dry_run}",
+        log_file)
 
     n_done = n_skipped = n_failed = 0
     failed_combos = []

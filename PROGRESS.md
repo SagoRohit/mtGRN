@@ -959,3 +959,70 @@ re-doing whichever combo was mid-training when the session died.
 ## implementation + firing evidence) done and documented above. Waiting
 ## on the user's Kaggle run.
 
+---
+
+## Phase 2 -- FINAL RESULT: corrected sweep completed (single seed per
+## tier, scope-reduced mid-run for time -- not the full 3-seed sweep)
+
+Mid-run, after Tier 1 seed 0 alone took 114.4 min (prep + 20 full training
+epochs, no early stopping this time), the user cut scope from the full
+9-run (3 tiers x 3 seeds) sweep down to 3 runs (1 seed per tier) to fit
+today's timeline. Confirmed this needed NO code change: the existing
+combo-level resumability (skip if `metrics.json` exists) plus
+`--n_seeds 1` on restart automatically skipped the already-completed
+tier1_seed0 and ran only tier2_seed0/tier3_seed0. All 3 results
+downloaded (`mtgrn/results_new/`) and checked directly (not just trusted).
+
+## Results
+
+| tier | n_cells_written | AUPRC | AUROC | ratio vs baseline (0.007237) |
+|------|-------------------|-------|-------|----------------------------------|
+| 1 (22,500, capped from 40,500) | 22,500 | 0.0950 | 0.9608 | 13.1x |
+| 2 (13,500, natural) | 13,500 | 0.0966 | 0.9595 | 13.3x |
+| 3 (8,100, natural)  | 8,100  | 0.0712 | 0.9548 | 9.8x |
+
+## Verification performed before trusting these numbers (not just presence-checked)
+
+1. **Fix confirmed**: `n_cells_written` is genuinely distinct and
+   correctly ordered (22500/13500/8100) -- the exact bug from the first
+   sweep (all three tiers silently forced to the same 1500) is gone.
+2. **Internal consistency**: `n_train_windows + n_test_windows` exactly
+   equals `n_windows_estimate` for every tier (22486, 13486, 8086) -- no
+   truncation/corruption. `this_dataset_baseline_auprc` is identical
+   (0.007237) across all three and back-computes to exactly 1155 true
+   edges -- matches every other model's known ground-truth count for this
+   dataset.
+3. **A real, directionally-sensible degradation trend appears** now that
+   the confound is fixed: Tier 3 (least data) scores meaningfully lower
+   (9.8x baseline) than Tier 1/2 (~13x, close to each other) -- this is
+   what proposal Section 5.5's RQ2 (density degradation) is supposed to
+   show, and it did NOT show up in the first (confounded) sweep.
+
+## Caveat, stated plainly: this is a 1-seed-per-tier pilot, not a
+## statistically confirmed result. With n=1, the Tier1-vs-Tier2 (13.1x
+## vs 13.3x, statistically indistinguishable) and Tier3's drop (9.8x)
+## can't be separated from ordinary seed-to-seed noise -- the original
+## 3-seed design existed specifically to make that call with confidence.
+## Treat the trend as suggestive, not proven, unless/until more seeds are
+## run.
+
+## Downloaded-artifact completeness check
+`mtgrn/results_new/` has `metrics.json`/`prep_meta.json`/`gt_edges.csv`/
+`prior_adjacency.npy`/`PseudoTime.csv` for all 3 tiers (complete for
+drawing the conclusions above). Missing, both judged NOT required:
+- `ExpressionData.csv` (all 3 tiers) -- not needed; MTGRN's prior is
+  dense TF-bipartite (100% edge coverage by construction), unlike
+  RiTINI's top-k prior, so there's no recall-ceiling check to run against
+  the raw expression data here.
+- `best_model.ckpt` (Tier 2/Tier 3 only -- Tier 1's was downloaded) --
+  optional; only needed for future post-hoc attention/checkpoint
+  diagnostics, not for trusting the metrics above.
+
+## STATUS: MTGRN Phase 2 CONCLUDED as scoped (1 seed/tier, corrected
+## cap). Fix verified working, real degradation signal observed
+## (unconfirmed statistically at n=1). Session can be closed on the
+## user's side. If more statistical confidence is wanted later, the next
+## step would be running seeds 1-2 for each tier (same commands, just
+## seed 1/2 instead of 0) -- not required to consider this experiment
+## done at its current, explicitly reduced scope.
+
